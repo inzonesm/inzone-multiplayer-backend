@@ -1,0 +1,30 @@
+# fly.toml — InZone Studio backend (the deploy service)
+#
+# Hosts the API the upload portal calls to push game servers onto your
+# Fly org. Pick a region close to your devs (this is a low-traffic
+# control-plane service, not a game server, so a single region is fine).
+
+app = "inzone-studio-backend"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"   # 1 GB so flyctl + multipart buffering have headroom

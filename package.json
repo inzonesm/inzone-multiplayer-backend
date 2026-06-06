@@ -1,0 +1,28 @@
+{
+  "name": "inzone-studio-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Server-deploy backend for InZone Studio — receives game-server zips from the upload portal and deploys them to InZone's Fly.io org.",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^9.0.1",
+    "fastify": "^5.2.0",
+    "firebase-admin": "^13.0.2",
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/yauzl": "^2.10.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
