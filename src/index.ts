@@ -1,12 +1,14 @@
 /* InZone Studio backend — HTTP entrypoint.
  *
- * Two endpoints:
- *   POST /deploy            multipart upload of a server bundle (zip + slug)
- *   GET  /deploy/:id        snapshot of a deployment doc (the upload UI
+ * Endpoints:
+ *   POST   /deploy          multipart upload of a server bundle (zip + slug)
+ *   GET    /deploy/:id      snapshot of a deployment doc (the upload UI
  *                           usually subscribes to Firestore directly for
  *                           live updates, but this is handy for retries
  *                           and curl-based testing)
- *   GET  /healthz           liveness probe
+ *   DELETE /server/:slug    destroy the Fly app(s) backing a game — called
+ *                           by the website before it deletes the game doc
+ *   GET    /healthz         liveness probe
  *
  * Fastify was chosen over Express for first-class multipart streaming + a
  * cleaner async error model. */
@@ -15,7 +17,9 @@ import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import { AuthError, verifyBearerToken } from './auth.js';
 import { runDeploy } from './deploy.js';
+import { clearGameServer, findFlyAppsForSlug } from './deployments.js';
 import { getDb } from './firebase.js';
+import { destroyApp } from './fly.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // mirror the extract.ts cap
@@ -46,7 +50,7 @@ app.addHook('onSend', async (req, reply, payload) => {
   if (ALLOW_ORIGINS.includes('*') || ALLOW_ORIGINS.includes(origin)) {
     reply.header('Access-Control-Allow-Origin', origin || '*');
     reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-    reply.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    reply.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     reply.header('Vary', 'Origin');
   }
   return payload;
@@ -108,6 +112,72 @@ app.post('/deploy', async (req, reply) => {
     req.log.error({ err }, 'deploy failed');
     return reply.code(500).send({ error: message });
   }
+});
+
+/** DELETE /server/:slug — tear down the Fly app(s) backing a game. The
+ *  website calls this before deleting a game doc so removing a game never
+ *  leaves a billed server running.
+ *
+ *  Ownership: the caller must own the game doc — or, when the doc is already
+ *  gone, own the deployment records that created the app(s). Candidates come
+ *  from both the doc's flyApp binding and the full deploy history, so stray
+ *  apps from failed/duplicate deploys get swept too. Idempotent: a game with
+ *  no server resolves to { destroyed: [] }. */
+const SELF_APP = process.env.FLY_APP_NAME ?? 'inzone-studio-backend';
+
+app.delete<{ Params: { slug: string } }>('/server/:slug', async (req, reply) => {
+  let user;
+  try {
+    user = await verifyBearerToken(req.headers.authorization);
+  } catch (err) {
+    if (err instanceof AuthError) return reply.code(err.status).send({ error: err.message });
+    throw err;
+  }
+  const slug = req.params.slug;
+  if (!/^[a-z0-9-]+$/.test(slug)) {
+    return reply.code(400).send({ error: 'slug must be lowercase kebab-case' });
+  }
+
+  const candidates = new Set<string>();
+  const gameSnap = await getDb().collection('html_games').doc(slug).get();
+  if (gameSnap.exists) {
+    const data = gameSnap.data()!;
+    if (data.uploaderId !== user.uid) {
+      return reply.code(403).send({ error: `You don't own game ${slug}.` });
+    }
+    if (typeof data.flyApp === 'string' && data.flyApp) candidates.add(data.flyApp);
+    const m =
+      typeof data.serverUrl === 'string'
+        ? data.serverUrl.match(/^wss?:\/\/([a-z0-9-]+)\.fly\.dev\/?$/)
+        : null;
+    if (m) candidates.add(m[1]);
+  }
+  for (const appName of await findFlyAppsForSlug(slug, user.uid)) candidates.add(appName);
+
+  const destroyed: string[] = [];
+  const failed: { app: string; error: string }[] = [];
+  for (const appName of candidates) {
+    // Hard guard: only InZone-managed game apps, never this control plane.
+    if (!appName.startsWith('inz-') || appName === SELF_APP) continue;
+    try {
+      await destroyApp(appName);
+      destroyed.push(appName);
+      req.log.info({ appName, slug, uid: user.uid }, 'destroyed game server app');
+    } catch (err) {
+      failed.push({ app: appName, error: err instanceof Error ? err.message : String(err) });
+      req.log.error({ err, appName, slug }, 'failed to destroy game server app');
+    }
+  }
+
+  if (gameSnap.exists && destroyed.length > 0) {
+    await clearGameServer(slug).catch(() => undefined);
+  }
+  if (failed.length > 0) {
+    return reply
+      .code(502)
+      .send({ error: `Failed to destroy: ${failed.map((f) => f.app).join(', ')}`, destroyed, failed });
+  }
+  return reply.send({ destroyed });
 });
 
 /** GET /deploy/:id — snapshot of a deployment doc. The frontend usually

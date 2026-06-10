@@ -102,6 +102,42 @@ export async function setGameFlyApp(slug: string, flyApp: string): Promise<void>
   await db.collection('html_games').doc(slug).set({ flyApp }, { merge: true });
 }
 
+/** Every Fly app this uploader's deploy history ever bound to a slug. Drawn
+ *  from server_deployments (which outlives the game doc), so destroy-on-delete
+ *  still finds the server when the doc is already gone, plus any stray apps
+ *  left behind by failed or duplicate deploys. */
+export async function findFlyAppsForSlug(slug: string, uploaderId: string): Promise<string[]> {
+  const db = getDb();
+  const snap = await db
+    .collection('server_deployments')
+    .where('gameSlug', '==', slug)
+    .where('uploaderId', '==', uploaderId)
+    .get();
+  const apps = new Set<string>();
+  for (const d of snap.docs) {
+    const app = d.data().flyApp;
+    if (typeof app === 'string' && app) apps.add(app);
+  }
+  return [...apps];
+}
+
+/** Strip the server bindings off a game doc after its Fly app is destroyed,
+ *  so the hub stops advertising a wss:// URL that no longer resolves. A
+ *  missing doc is fine — the caller may be tearing down post-deletion. */
+export async function clearGameServer(slug: string): Promise<void> {
+  const db = getDb();
+  try {
+    await db.collection('html_games').doc(slug).update({
+      serverUrl: FieldValue.delete(),
+      flyApp: FieldValue.delete(),
+      serverStatus: FieldValue.delete(),
+      serverUpdatedAt: FieldValue.delete(),
+    });
+  } catch {
+    /* doc already deleted — nothing to clear */
+  }
+}
+
 /** Confirms the dev who's deploying actually owns the game they're targeting.
  *  Returns the game doc or throws. */
 export async function loadGameOwnedBy(

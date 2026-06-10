@@ -149,6 +149,10 @@ export async function deployApp(args: {
       '--remote-only',
       '--app', args.appName,
       '--yes',
+      // Game servers are stateful: each machine runs its own in-memory world,
+      // so Fly's default HA pair would split players across two invisible
+      // copies of the game. One machine per app.
+      '--ha=false',
     ],
     cwd: args.cwd,
     onLine: args.onLine,
@@ -156,6 +160,18 @@ export async function deployApp(args: {
   });
   if (res.code !== 0) {
     throw new Error(`flyctl deploy failed (exit ${res.code}): ${res.stderr.trim() || res.stdout.trim()}`);
+  }
+}
+
+/** Destroy a Fly app outright (machines, IPs, the lot). Idempotent: an
+ *  already-missing app resolves cleanly so double-deletes and retries after a
+ *  partial failure don't surface spurious errors. */
+export async function destroyApp(appName: string): Promise<void> {
+  const res = await runFlyctl({ argv: ['apps', 'destroy', appName, '--yes'] });
+  if (res.code !== 0) {
+    const out = `${res.stderr}\n${res.stdout}`;
+    if (/could not find|not found|doesn'?t exist/i.test(out)) return;
+    throw new Error(`flyctl apps destroy ${appName} failed: ${res.stderr.trim() || res.stdout.trim()}`);
   }
 }
 
